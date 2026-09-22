@@ -6,6 +6,9 @@ How to keep this current: add the entry in the same pull request as the change, 
 
 ## Unreleased
 
+### Tests
+- Conscience skill-label terminal labeller and scoring report for calibration.
+
 <!-- Empty. Next release starts here. -->
 
 ## 0.38.2
