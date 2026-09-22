@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { env } from "node:process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { authorize, aggregateLevel, escalateBlastRadius, escalateRulesViolation, isAuthEligible, isNegated, parseViolationJudgments, patternHitsToViolations, removeAuthorized, scopeMatches } from "../src/guard.js";
+import { authorize, aggregateLevel, escalateBlastRadius, escalateRulesViolation, isAuthEligible, parseViolationJudgments, patternHitsToViolations, removeAuthorized, scopeMatches } from "../src/guard.js";
 import type { Authorization, EscalatedViolation, Violation } from "../src/guard.js";
 import { checkPiWardenMissing, extractRules, resolveRulesFile } from "../src/rules-file.js";
 import { buildInitPrompt, buildProjectContext, detectProjectType, generateStarterRules, writeStarterRules } from "../src/init.js";
@@ -389,6 +390,25 @@ test("resolveRulesFile: AGENTS.md is used when pi-warden.md is missing", async (
   const resolved = resolveRulesFile(dir);
   assert.equal(resolved?.source, "AGENTS.md");
   await rm(dir, { recursive: true, force: true });
+});
+
+test("resolveRulesFile: ~/.agents/warden.md wins before project fallback docs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-warden-rulesfile-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-warden-home-"));
+  const previousHome = env.HOME;
+  env.HOME = home;
+  try {
+    await mkdir(join(home, ".agents"), { recursive: true });
+    await writeFile(join(home, ".agents", "warden.md"), "# Home rules\nKeep review folders disposable.\n");
+    await writeFile(join(dir, "AGENTS.md"), "# Agents\nAlways test.\n");
+    const resolved = resolveRulesFile(dir);
+    assert.equal(resolved?.source, "~/.agents/warden.md");
+    assert.match(resolved?.content ?? "", /Keep review folders disposable/);
+  } finally {
+    if (previousHome === undefined) delete env.HOME; else env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("resolveRulesFile: returns null when no rules file exists", async () => {

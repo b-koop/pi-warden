@@ -1,11 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { redact } from "./redact.js";
-import { RULES_FILE, FALLBACK_FILES } from "./rules.js";
+import { FALLBACK_FILES, HOME_RULES_FILE, RULES_FILE, homeRulesPath } from "./rules.js";
 
 /**
  * Resolved active rules file for escalation and context.
- * Resolution order: pi-warden.md → AGENTS.md → CLAUDE.md → README.md.
+ * Resolution order: pi-warden.md → ~/.agents/warden.md → AGENTS.md → CLAUDE.md → README.md.
  */
 
 export interface ResolvedRulesFile {
@@ -14,10 +14,13 @@ export interface ResolvedRulesFile {
   source: string;
 }
 
-const RULES_CANDIDATES = [
-  { path: RULES_FILE, source: RULES_FILE },
-  ...FALLBACK_FILES.map(f => ({ path: f, source: f })),
-];
+function rulesCandidates(): Array<{ path: string; source: string }> {
+  return [
+    { path: RULES_FILE, source: RULES_FILE },
+    { path: homeRulesPath(), source: HOME_RULES_FILE },
+    ...FALLBACK_FILES.map(f => ({ path: f, source: f })),
+  ];
+}
 
 const MAX_CHARS = 16_000; // ~4000 tokens
 
@@ -56,8 +59,8 @@ export function extractRules(content: string, maxTokens = 4000): string {
 
 /** Resolve the active rules file. Returns the first existing file, or null. Content is redacted before it leaves this machine. */
 export function resolveRulesFile(cwd: string): ResolvedRulesFile | null {
-  for (const candidate of RULES_CANDIDATES) {
-    const fullPath = join(cwd, candidate.path);
+  for (const candidate of rulesCandidates()) {
+    const fullPath = isAbsolute(candidate.path) ? candidate.path : join(cwd, candidate.path);
     if (existsSync(fullPath)) {
       let raw: string;
       try {
@@ -76,8 +79,9 @@ export function resolveRulesFile(cwd: string): ResolvedRulesFile | null {
 /** Returns missing status and the fallback source if pi-warden.md is absent. */
 export function checkPiWardenMissing(cwd: string): { missing: boolean; fallbackSource?: string } {
   if (existsSync(join(cwd, "pi-warden.md"))) return { missing: false };
-  for (const candidate of RULES_CANDIDATES.slice(1)) {
-    if (existsSync(join(cwd, candidate.path))) return { missing: true, fallbackSource: candidate.source };
+  for (const candidate of rulesCandidates().slice(1)) {
+    const fullPath = isAbsolute(candidate.path) ? candidate.path : join(cwd, candidate.path);
+    if (existsSync(fullPath)) return { missing: true, fallbackSource: candidate.source };
   }
   return { missing: true };
 }
