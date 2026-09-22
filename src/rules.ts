@@ -1,7 +1,8 @@
 import { readFileSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ask, choice } from "pi-typesafe";
-import type { IntegrationErrorCode, Judge } from "pi-typesafe";
+import type { EntryType, IntegrationErrorCode, Judge, Questions, SystemOneRequest } from "pi-typesafe";
 import type { RulesConfig } from "./config.js";
 import { redact } from "./redact.js";
 import { DEFAULT_TEMPLATES, renderTemplate, rulesTokens } from "./widget.js";
@@ -36,7 +37,11 @@ export interface RuleSet {
 }
 
 export const RULES_FILE = "pi-warden.md";
+export const HOME_RULES_FILE = "~/.agents/warden.md";
 export const FALLBACK_FILES = ["AGENTS.md", "CLAUDE.md", "README.md"];
+export function homeRulesPath(): string {
+  return join(homedir(), ".agents", "warden.md");
+}
 /** TypeSafe answers at most 32 questions per request; one is kept for the edit locator. */
 export const MAX_RULES = 31;
 const CONTENT_LIMIT = 6000;
@@ -226,6 +231,8 @@ export class RuleStore {
     if (root !== undefined) return ruleSet([RULES_FILE], [root], config.maxChars);
     const configured = config.files.map(file => ({ file, text: this.read(resolve(cwd, file)) })).filter((entry): entry is { file: string; text: string } => entry.text !== undefined);
     if (configured.length) return ruleSet(configured.map(entry => entry.file), configured.map(entry => entry.text), config.maxChars);
+    const home = this.read(homeRulesPath());
+    if (home !== undefined) return ruleSet([HOME_RULES_FILE], [home], config.maxChars);
     if (!config.fallback) return undefined;
     for (const file of FALLBACK_FILES) {
       const text = this.read(resolve(cwd, file));
@@ -356,9 +363,9 @@ export function ruleQuestion(rule: Rule) {
   return choice(`${FRAME}\nRule: ${rule.name}\n${rule.body ? clip(rule.body, RULE_BODY_LIMIT) : "(no further detail beyond the heading)"}`, OUTCOMES);
 }
 
-export function buildRulesRequest(target: RulesTarget, set: RuleSet) {
+export function buildRulesRequest(target: RulesTarget, set: RuleSet): SystemOneRequest<Questions> & { applicable: Rule[] } {
   const applicable = rulesFor(set, target.path);
-  const questions: Record<string, ReturnType<typeof choice>> = {};
+  const questions = {} as Questions;
   for (const rule of applicable) questions[`rule_${rule.id}`] = ruleQuestion(rule);
   if (set.aggregate !== undefined && !set.rules.length) {
     questions[AGGREGATE_QUESTION] = choice(
@@ -384,7 +391,7 @@ export function buildRulesRequest(target: RulesTarget, set: RuleSet) {
       ...(target.edits === undefined ? {} : { edits: target.edits.map(edit => ({ id: edit.id, ...(edit.before === undefined ? {} : { before: edit.before }), newText: edit.newText })) }),
       ...(target.moreEdits ? { moreEdits: target.moreEdits } : {}),
       ...(set.aggregate !== undefined && !set.rules.length ? { rules: set.aggregate } : {}),
-    },
+    } as EntryType,
     questions,
     applicable,
   };

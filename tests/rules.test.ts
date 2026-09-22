@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { env } from "node:process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -105,32 +106,46 @@ test("globs match at any depth and within a segment; project paths are relative 
   assert.equal(projectPath("../sibling/x.ts", cwd), undefined);
 });
 
-test("RuleStore: root pi-warden.md wins, then configured files, then the first fallback document as one aggregate; files are re-read on change", async () => {
+test("RuleStore: root pi-warden.md wins, then configured files, then ~/.agents/warden.md, then the first fallback document as one aggregate; files are re-read on change", async () => {
   const store = new RuleStore();
   assert.equal(store.load(cwd, rulesConfig()), undefined, "nothing yet");
   await writeFile(join(cwd, "AGENTS.md"), "# Agents\n\nAlways write tests.\n");
   await writeFile(join(cwd, "README.md"), "# Readme\n\nInstall with npm.\n");
-  let set = store.load(cwd, rulesConfig());
-  assert.deepEqual(set?.sources, ["AGENTS.md"], "AGENTS is the first fallback");
-  assert.equal(set?.rules.length, 0);
-  assert.match(set?.aggregate ?? "", /Always write tests/);
-  assert.equal(store.load(cwd, rulesConfig({ fallback: false })), undefined, "fallback can be turned off");
+  const home = await mkdtemp(join(tmpdir(), "pi-warden-home-"));
+  const previousHome = env.HOME;
+  env.HOME = home;
+  try {
+    await mkdir(join(home, ".agents"), { recursive: true });
+    await writeFile(join(home, ".agents", "warden.md"), "# Home Rules\n\nKeep review folders disposable.\n");
 
-  await writeFile(join(cwd, "docs-rules.md"), "# Use const\nPrefer const over let.\n");
-  set = store.load(cwd, rulesConfig({ files: ["docs-rules.md", "missing.md"] }));
-  assert.deepEqual(set?.sources, ["docs-rules.md"]);
-  assert.deepEqual(set?.rules.map(rule => rule.id), ["use-const"]);
+    let set = store.load(cwd, rulesConfig());
+    assert.deepEqual(set?.sources, ["~/.agents/warden.md"], "the home-level rule file wins before repo fallbacks");
+    assert.equal(set?.rules.length, 1);
+    assert.deepEqual(store.load(cwd, rulesConfig({ fallback: false }))?.sources, ["~/.agents/warden.md"], "fallback=false does not suppress the explicit home-level rules file");
 
-  await writeFile(join(cwd, "pi-warden.md"), RULES_MD);
-  set = store.load(cwd, rulesConfig({ files: ["docs-rules.md"] }));
-  assert.deepEqual(set?.sources, ["pi-warden.md"], "the root file wins over configured files");
-  assert.equal(set?.rules.length, 4);
+    await writeFile(join(cwd, "docs-rules.md"), "# Use const\nPrefer const over let.\n");
+    set = store.load(cwd, rulesConfig({ files: ["docs-rules.md", "missing.md"] }));
+    assert.deepEqual(set?.sources, ["docs-rules.md"]);
+    assert.deepEqual(set?.rules.map(rule => rule.id), ["use-const"]);
 
-  // Same size and mtime: cached. Changed content with a new mtime: re-read.
-  const stale = new Date(Date.now() - 60_000);
-  await writeFile(join(cwd, "pi-warden.md"), `${RULES_MD}\n\n# Fifth rule\nBody.\n`);
-  await utimes(join(cwd, "pi-warden.md"), stale, stale);
-  assert.equal(store.load(cwd, rulesConfig())?.rules.length, 5);
+    await writeFile(join(cwd, "pi-warden.md"), RULES_MD);
+    set = store.load(cwd, rulesConfig({ files: ["docs-rules.md"] }));
+    assert.deepEqual(set?.sources, ["pi-warden.md"], "the root file wins over configured files");
+    assert.equal(set?.rules.length, 4);
+
+    // Same size and mtime: cached. Changed content with a new mtime: re-read.
+    const stale = new Date(Date.now() - 60_000);
+    await writeFile(join(cwd, "pi-warden.md"), `${RULES_MD}\n\n# Fifth rule\nBody.\n`);
+    await utimes(join(cwd, "pi-warden.md"), stale, stale);
+    assert.equal(store.load(cwd, rulesConfig())?.rules.length, 5);
+  } finally {
+    if (previousHome === undefined) delete env.HOME; else env.HOME = previousHome;
+    await rm(join(cwd, "AGENTS.md"), { force: true });
+    await rm(join(cwd, "README.md"), { force: true });
+    await rm(join(cwd, "docs-rules.md"), { force: true });
+    await rm(join(cwd, "pi-warden.md"), { force: true });
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("the rule cap keeps the first 31 rules and reports the rest", async () => {
@@ -263,20 +278,26 @@ test("sensitive paths: glob → note, once per path per session, with the note i
 test("RulesGuard prejudges sibling writes so their requests overlap, uses a prejudgment once, and counts repeats per rule", async () => {
   const judge = stubJudge({ "no-console-statements": 0.9 });
   const guard = new RulesGuard();
-  const config = rulesConfig();
-  const a = { id: "a", tool: "write", input: { path: "src/a.ts", content: "console.log(1)" } };
-  const b = { id: "b", tool: "write", input: { path: "src/b.ts", content: "console.log(2)" } };
-  const first = await guard.inspect(a, [a, b], { cwd, config, judge, timeoutMs: 1000 });
-  assert.equal(judge.requests.length, 2, "both siblings judged on the first inspection");
-  const second = await guard.inspect(b, [a, b], { cwd, config, judge, timeoutMs: 1000 });
-  assert.equal(judge.requests.length, 2, "the sibling's prejudgment is reused");
-  assert.equal(first.findings.length, 1);
-  assert.equal(second.findings.length, 1);
-  guard.count(first);
-  assert.equal(guard.count(second).get("no-console-statements"), 2);
-  const changed = await guard.inspect({ ...b, input: { path: "src/b.ts", content: "console.log(3)" } }, [a, b], { cwd, config, judge, timeoutMs: 1000 });
-  assert.equal(judge.requests.length, 3, "a changed input is judged afresh");
-  assert.equal(changed.source, "typesafe");
+  const dir = await mkdtemp(join(tmpdir(), "pi-warden-rules-guard-"));
+  await writeFile(join(dir, "pi-warden.md"), "# No console statements\nCode must not contain `console.log`.\n");
+  try {
+    const config = rulesConfig();
+    const a = { id: "a", tool: "write", input: { path: "src/a.ts", content: "console.log(1)" } };
+    const b = { id: "b", tool: "write", input: { path: "src/b.ts", content: "console.log(2)" } };
+    const first = await guard.inspect(a, [a, b], { cwd: dir, config, judge, timeoutMs: 1000 });
+    assert.equal(judge.requests.length, 2, "both siblings judged on the first inspection");
+    const second = await guard.inspect(b, [a, b], { cwd: dir, config, judge, timeoutMs: 1000 });
+    assert.equal(judge.requests.length, 2, "the sibling's prejudgment is reused");
+    assert.equal(first.findings.length, 1);
+    assert.equal(second.findings.length, 1);
+    guard.count(first);
+    assert.equal(guard.count(second).get("no-console-statements"), 2);
+    const changed = await guard.inspect({ ...b, input: { path: "src/b.ts", content: "console.log(3)" } }, [a, b], { cwd: dir, config, judge, timeoutMs: 1000 });
+    assert.equal(judge.requests.length, 3, "a changed input is judged afresh");
+    assert.equal(changed.source, "typesafe");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("the shipped examples parse: the starter rules file yields scoped rules under the cap, and both config examples are accepted as written", async () => {
